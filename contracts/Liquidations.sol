@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.9;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -7,72 +7,98 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "./uniswap/IUniswapV2Router.sol";
 import "./uniswap/v3/ISwapRouter.sol";
 
-import "./dodo/IDODO.sol";
-
-import "./interfaces/IFlashloan.sol";
-
-import "./base/DodoBase.sol";
-import "./dodo/IDODOProxy.sol";
-import "./base/FlashloanValidation.sol";
-import "./base/Withdraw.sol";
-
 import "./libraries/Part.sol";
-import "./libraries/RouteUtils.sol";
+import "./interfaces/ILiquidations.sol";
+import "./dodo/IDODOProxy.sol";
+import "./dodo/IDODO.sol";
+import "./aave/IPool.sol";
 
-contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
+import "./aave/FlashLoanSimpleReceiverBase.sol";
+
+contract Liquidations is FlashLoanSimpleReceiverBase, ILiquidations {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
-    event SentProfit(address recipient, uint256 profit);
-    event SwapFinished(address token, uint256 amount);
+    constructor(IPoolAddressesProvider provider)
+        FlashLoanSimpleReceiverBase(provider)
+    {}
 
-    function dodoFlashLoan(FlashParams memory params) external checkParams(params) {
+    function liquidation(FlashParams memory params) external {
+        uint256 loanTokenIdx = params.routes[0].hops[0].path.length - 1;
+        address loanToken = params.routes[0].hops[0].path[loanTokenIdx];
+        uint256 loanAmount = IERC20(params.aToken).balanceOf(params.user);
         bytes memory data = abi.encode(
             FlashCallbackData({
-                me: msg.sender,
-                flashLoanPool: params.flashLoanPool,
-                loanAmount: params.loanAmount,
-                routes: params.routes
+                routes: params.routes,
+                user: params.user,
+                me: msg.sender
             })
         );
-
-        address loanToken = RouteUtils.getInitialToken(params.routes[0]);
-        IDODO(params.flashLoanPool).flashLoan(
-            IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
-                ? params.loanAmount
-                : 0,
-            IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
-                ? 0
-                : params.loanAmount,
+        IPool(address(POOL)).flashLoanSimple(
             address(this),
-            data
+            loanToken,
+            loanAmount,
+            data,
+            0
         );
     }
 
-    function _flashLoanCallBack(
-        address,
-        uint256,
-        uint256,
-        bytes calldata data
-    ) internal override {
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address, // initiator
+        bytes memory params
+    ) public override returns (bool) {
         FlashCallbackData memory decoded = abi.decode(
-            data,
+            params,
             (FlashCallbackData)
         );
-        address loanToken = RouteUtils.getInitialToken(decoded.routes[0]);
-
+        //check the contract has the specified balance
         require(
-            IERC20(loanToken).balanceOf(address(this)) >= decoded.loanAmount,
-            "Failed to borrow loan token"
+            amount <= IERC20(asset).balanceOf(address(this)),
+            "Invalid balance for the contract"
         );
 
-        routeLoop(decoded.routes, decoded.loanAmount);
+        address debtAsset = decoded.routes[0].hops[0].path[0];
+
+        uint256 amountOut = liquidation(debtAsset, asset, amount, decoded.user);
+        routeLoop(decoded.routes, amountOut);
+
+        uint256 amountToReturn = amount.add(premium);
+        require(
+            IERC20(asset).balanceOf(address(this)) >= amountToReturn,
+            "Not enough amount to return loan"
+        );
+
+        approveToken(asset, address(POOL), amountToReturn);
+
+        // send all loanToken to msg.sender
+        uint256 remained = IERC20(asset).balanceOf(address(this)) -
+            amountToReturn;
+        IERC20(asset).transfer(decoded.me, remained);
+        return true;
     }
 
-    function routeLoop(
-        Route[] memory routes,
-        uint256 totalAmount
-    ) internal checkTotalRoutePart(routes) {
+    function liquidation(
+        address collateralAsset,
+        address debtAsset,
+        uint256 totalDebtBase,
+        address user
+    ) internal returns (uint256) {
+        approveToken(debtAsset, address(POOL), totalDebtBase);
+        IPool(address(POOL)).liquidationCall(
+            collateralAsset,
+            debtAsset,
+            user,
+            totalDebtBase,
+            false
+        );
+        uint256 amountOut = IERC20(collateralAsset).balanceOf(address(this));
+        return amountOut;
+    }
+
+    function routeLoop(Route[] memory routes, uint256 totalAmount) internal {
         for (uint256 i = 0; i < routes.length; i++) {
             uint256 amountIn = Part.partToAmountIn(routes[i].part, totalAmount);
             hopLoop(routes[i], amountIn);
@@ -86,10 +112,10 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
         }
     }
 
-    function pickProtocol(
-        Hop memory hop,
-        uint256 amountIn
-    ) internal returns (uint256 amountOut) {
+    function pickProtocol(Hop memory hop, uint256 amountIn)
+        internal
+        returns (uint256 amountOut)
+    {
         if (hop.protocol == 0) {
             amountOut = uniswapV3(hop.data, amountIn, hop.path);
         } else if (hop.protocol < 8) {
@@ -130,7 +156,6 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
     ) internal returns (uint256 amountOut) {
         address router = abi.decode(data, (address));
         approveToken(path[0], router, amountIn);
-
         return
             IUniswapV2Router(router).swapExactTokensForTokens(
                 amountIn,
@@ -154,7 +179,6 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
             ? 0
             : 1;
         approveToken(path[0], dodoApprove, amountIn);
-
         amountOut = IDODOProxy(dodoProxy).dodoSwapV2TokenToToken(
             path[0],
             path[1],
@@ -167,13 +191,11 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
         );
     }
 
-
-
     function approveToken(
         address token,
         address to,
         uint256 amountIn
     ) internal {
-        require(IERC20(token).approve(to, amountIn), "approve failed.");
+        require(IERC20(token).approve(to, amountIn), "af");
     }
 }
