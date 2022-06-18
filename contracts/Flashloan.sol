@@ -19,6 +19,8 @@ import "./base/Withdraw.sol";
 import "./libraries/Part.sol";
 import "./libraries/RouteUtils.sol";
 
+import "hardhat/console.sol";
+
 contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -27,6 +29,17 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
     event SwapFinished(address token, uint256 amount);
 
     function dodoFlashLoan(FlashParams memory params) external checkParams(params) {
+        // for (uint i=0; i < params.routes.length; i++) {
+        //     for (uint ii =0; ii < params.routes[i].hops.length; ii++) {
+        //         console.log("hop");
+        //         console.logBytes(params.routes[i].hops[ii].data);
+        //         console.log(params.routes[i].hops[ii].protocol);
+
+        //         for (uint iii =0; iii < params.routes[i].hops[ii].path.length; iii++) {
+        //             console.log(params.routes[i].hops[ii].path[iii]);
+        //         }
+        //     }
+        // }
         bytes memory data = abi.encode(
             FlashCallbackData({
                 me: msg.sender,
@@ -37,6 +50,8 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
         );
 
         address loanToken = RouteUtils.getInitialToken(params.routes[0]);
+        console.log("loanToken", loanToken);
+        console.log("BASE_TOKEN", IDODO(params.flashLoanPool)._BASE_TOKEN_());
         IDODO(params.flashLoanPool).flashLoan(
             IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
                 ? params.loanAmount
@@ -67,12 +82,19 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
         );
 
         routeLoop(decoded.routes, decoded.loanAmount);
+        emit SwapFinished(loanToken, IERC20(loanToken).balanceOf(address(this)));
+
+        require(IERC20(loanToken).balanceOf(address(this)) >= decoded.loanAmount, "Not enough amount to return loan");
+        //Return funds
+        IERC20(loanToken).transfer(decoded.flashLoanPool, decoded.loanAmount);
+
+        // send all loanToken to msg.sender
+        uint256 remained = IERC20(loanToken).balanceOf(address(this));
+        IERC20(loanToken).transfer(decoded.me, remained);
+        emit SentProfit(decoded.me, remained);
     }
 
-    function routeLoop(
-        Route[] memory routes,
-        uint256 totalAmount
-    ) internal checkTotalRoutePart(routes) {
+    function routeLoop(Route[] memory routes, uint256 totalAmount) internal checkTotalRoutePart(routes) {
         for (uint256 i = 0; i < routes.length; i++) {
             uint256 amountIn = Part.partToAmountIn(routes[i].part, totalAmount);
             hopLoop(routes[i], amountIn);
@@ -86,10 +108,7 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
         }
     }
 
-    function pickProtocol(
-        Hop memory hop,
-        uint256 amountIn
-    ) internal returns (uint256 amountOut) {
+    function pickProtocol(Hop memory hop, uint256 amountIn) internal returns (uint256 amountOut) {
         if (hop.protocol == 0) {
             amountOut = uniswapV3(hop.data, amountIn, hop.path);
         } else if (hop.protocol < 8) {
@@ -130,7 +149,6 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
     ) internal returns (uint256 amountOut) {
         address router = abi.decode(data, (address));
         approveToken(path[0], router, amountIn);
-
         return
             IUniswapV2Router(router).swapExactTokensForTokens(
                 amountIn,
@@ -154,7 +172,6 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
             ? 0
             : 1;
         approveToken(path[0], dodoApprove, amountIn);
-
         amountOut = IDODOProxy(dodoProxy).dodoSwapV2TokenToToken(
             path[0],
             path[1],
@@ -166,8 +183,6 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
             block.timestamp
         );
     }
-
-
 
     function approveToken(
         address token,

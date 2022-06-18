@@ -2,7 +2,7 @@
 pragma solidity ^0.8.9;
 
 library BytesLib {
-    function marge(
+    function merge(
         bytes memory a,
         bytes memory b
     ) internal pure returns (bytes memory c) {
