@@ -29,17 +29,7 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
     event SwapFinished(address token, uint256 amount);
 
     function dodoFlashLoan(FlashParams memory params) external checkParams(params) {
-        // for (uint i=0; i < params.routes.length; i++) {
-        //     for (uint ii =0; ii < params.routes[i].hops.length; ii++) {
-        //         console.log("hop");
-        //         console.logBytes(params.routes[i].hops[ii].data);
-        //         console.log(params.routes[i].hops[ii].protocol);
-
-        //         for (uint iii =0; iii < params.routes[i].hops[ii].path.length; iii++) {
-        //             console.log(params.routes[i].hops[ii].path[iii]);
-        //         }
-        //     }
-        // }
+        console.log("params.flashLoanPool", params.flashLoanPool);
         bytes memory data = abi.encode(
             FlashCallbackData({
                 me: msg.sender,
@@ -48,20 +38,23 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
                 routes: params.routes
             })
         );
+        console.logBytes(data);
 
-        address loanToken = RouteUtils.getInitialToken(params.routes[0]);
-        console.log("loanToken", loanToken);
-        console.log("BASE_TOKEN", IDODO(params.flashLoanPool)._BASE_TOKEN_());
-        IDODO(params.flashLoanPool).flashLoan(
-            IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
-                ? params.loanAmount
-                : 0,
-            IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
-                ? 0
-                : params.loanAmount,
-            address(this),
-            data
-        );
+        // console.log(IDODO(params.flashLoanPool)._BASE_RESERVE_());
+
+        // address loanToken = RouteUtils.getInitialToken(params.routes[0]);
+        // console.log("loanToken", loanToken);
+        // console.log("BASE_TOKEN", IDODO(params.flashLoanPool)._BASE_TOKEN_());
+        // IDODO(params.flashLoanPool).flashLoan(
+        //     IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
+        //         ? params.loanAmount
+        //         : 0,
+        //     IDODO(params.flashLoanPool)._BASE_TOKEN_() == loanToken
+        //         ? 0
+        //         : params.loanAmount,
+        //     address(this),
+        //     data
+        // );
     }
 
     function _flashLoanCallBack(
@@ -81,17 +74,17 @@ contract Flashloan is IFlashloan, DodoBase, FlashloanValidation, Withdraw {
             "Failed to borrow loan token"
         );
 
-        routeLoop(decoded.routes, decoded.loanAmount);
-        emit SwapFinished(loanToken, IERC20(loanToken).balanceOf(address(this)));
+        // routeLoop(decoded.routes, decoded.loanAmount);
+        // emit SwapFinished(loanToken, IERC20(loanToken).balanceOf(address(this)));
 
-        require(IERC20(loanToken).balanceOf(address(this)) >= decoded.loanAmount, "Not enough amount to return loan");
-        //Return funds
-        IERC20(loanToken).transfer(decoded.flashLoanPool, decoded.loanAmount);
+        // require(IERC20(loanToken).balanceOf(address(this)) >= decoded.loanAmount, "Not enough amount to return loan");
+        // //Return funds
+        // IERC20(loanToken).transfer(decoded.flashLoanPool, decoded.loanAmount);
 
-        // send all loanToken to msg.sender
-        uint256 remained = IERC20(loanToken).balanceOf(address(this));
-        IERC20(loanToken).transfer(decoded.me, remained);
-        emit SentProfit(decoded.me, remained);
+        // // send all loanToken to msg.sender
+        // uint256 remained = IERC20(loanToken).balanceOf(address(this));
+        // IERC20(loanToken).transfer(decoded.me, remained);
+        // emit SentProfit(decoded.me, remained);
     }
 
     function routeLoop(Route[] memory routes, uint256 totalAmount) internal checkTotalRoutePart(routes) {
